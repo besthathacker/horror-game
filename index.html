@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Trail of Echoes — Web Horror Slice</title>
+<style>
+  html,body{height:100%;margin:0;background:#000;overflow:hidden;font-family:system-ui,Segoe UI,Roboto}
+  #game{width:100%;height:100%}
+  #hud{position:fixed;left:0;right:0;bottom:0;padding:12px;
+       display:flex;gap:10px;justify-content:center;pointer-events:none}
+  .bar{width:200px;height:10px;background:#222;outline:1px solid #444;border-radius:12px;overflow:hidden}
+  .fill{height:100%;background:#6aff7a;transition:width .1s}
+  #sanity .fill{background:#ff6a6a}
+  #prompt{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+          color:#fff;font-size:14px;background:rgba(0,0,0,.5);padding:10px 14px;border-radius:8px}
+  #reticle{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);color:#fff;
+           opacity:.5;font-size:18px;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="reticle">+</div>
+<div id="prompt">Click to lock cursor • WASD move • Shift sprint • F flashlight</div>
+<div id="hud">
+  <div class="bar" id="stamina"><div class="fill" style="width:100%"></div></div>
+  <div class="bar" id="sanity"><div class="fill" style="width:100%"></div></div>
+</div>
+
+<!-- Babylon UMD builds from CDN -->
+<script src="https://cdn.babylonjs.com/babylon.js"></script>
+<script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+<script src="https://cdn.babylonjs.com/postProcessesLibrary/babylon.postProcess.min.js"></script>
+
+<script>
+(async function () {
+  const canvas = document.getElementById("game");
+  const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true, antialias: true });
+
+  const createScene = function () {
+    const scene = new BABYLON.Scene(engine);
+    scene.clearColor = new BABYLON.Color4(0,0,0,1);
+
+    // Foggy, night forest mood
+    scene.fogMode = BABYLON.Scene.FOGMODE_EXP2;
+    scene.fogColor = new BABYLON.Color3(0.02,0.03,0.035);
+    scene.fogDensity = 0.03;
+
+    // Camera — first person
+    const camera = new BABYLON.UniversalCamera("cam", new BABYLON.Vector3(0, 1.75, -8), scene);
+    camera.minZ = 0.01;
+    camera.speed = 0.12;
+    camera.inertia = 0.1;
+    camera.angularSensibility = 2200;
+    camera.attachControl(canvas, true);
+    camera.inputs.clear(); // we want classic FPS keys + mouse
+    camera.inputs.addMouse();
+    camera.inputs.addKeyboard();
+
+    // Pointer lock
+    const lock = () => canvas.requestPointerLock && canvas.requestPointerLock();
+    canvas.addEventListener("click", () => { lock(); document.getElementById('prompt').style.display='none'; });
+
+    // Ground + path
+    const ground = BABYLON.MeshBuilder.CreateGround("g", { width: 80, height: 240, subdivisions: 64 }, scene);
+    const gMat = new BABYLON.PBRMaterial("gmat", scene);
+    gMat.roughness = 1; gMat.metallic = 0;
+    gMat.albedoColor = new BABYLON.Color3(0.08,0.09,0.08);
+    ground.material = gMat;
+
+    // Dirt path stripe
+    const path = BABYLON.MeshBuilder.CreateGround("path", { width: 6, height: 240, subdivisions: 2 }, scene);
+    path.position.y = 0.01;
+    const pMat = new BABYLON.PBRMaterial("pmat", scene);
+    pMat.albedoColor = new BABYLON.Color3(0.11,0.10,0.09);
+    pMat.roughness = 0.95; pMat.metallic = 0;
+    path.material = pMat;
+
+    // Scatter "trees" (cheap impostors for now)
+    const trunk = BABYLON.MeshBuilder.CreateCylinder("trunk", { height: 8, diameter: 0.3 }, scene);
+    const tMat = new BABYLON.PBRMaterial("tmat", scene); tMat.albedoColor = new BABYLON.Color3(0.1,0.07,0.05); tMat.roughness=1;
+    trunk.material = tMat;
+
+    const crown = BABYLON.MeshBuilder.CreateSphere("crown", { diameter: 3 }, scene);
+    const cMat = new BABYLON.PBRMaterial("cmat", scene); cMat.albedoColor = new BABYLON.Color3(0.05,0.12,0.06); cMat.roughness=1;
+    crown.material = cMat; crown.position.y = 4;
+
+    const tree = BABYLON.Mesh.MergeMeshes([trunk, crown], true, true, undefined, false, true);
+    tree.isVisible = false;
+
+    const rnd = (a,b)=>a+Math.random()*(b-a);
+    for (let i=0;i<180;i++){
+      const t = tree.clone("t"+i); t.isVisible = true;
+      const side = Math.random()<0.5 ? -1 : 1;
+      const x = side * rnd(7, 35);
+      const z = rnd(-115,115);
+      const scale = rnd(0.8,1.6);
+      t.scaling.set(scale,scale,scale);
+      t.position.set(x, 4, z);
+      t.rotation.y = Math.random()*Math.PI*2;
+    }
+
+    // Dim ambient so the flashlight matters; soft moonlight hemi
+    const hemi = new BABYLON.HemisphericLight("h", new BABYLON.Vector3(0,1,0), scene);
+    hemi.intensity = 0.08;
+
+    // Flashlight (spot)
+    const flashlight = new BABYLON.SpotLight("spot", camera.position, new BABYLON.Vector3(0,0,1), Math.PI/5, 12, scene);
+    flashlight.intensity = 8; flashlight.range = 35;
+    flashlight.shadowEnabled = false;
+
+    // Post FX: film grain + chromatic aberration + slight bloom
+    const grain = new BABYLON.GrainPostProcess("grain", 1.0, camera);
+    grain.intensity = 12;
+    const ca = new BABYLON.ChromaticAberrationPostProcess("ca", camera, { aberrationAmount: 10, radialIntensity: 0.2, direction: new BABYLON.Vector2(1,1) }, 1.0);
+    const pipeline = new BABYLON.DefaultRenderingPipeline("drp", true, scene, [camera]);
+    pipeline.bloomEnabled = true; pipeline.bloomKernel = 16; pipeline.bloomWeight = 0.08;
+
+    // Simple “thing in the woods”
+    const monster = BABYLON.MeshBuilder.CreateSphere("thing", {diameter:1.2}, scene);
+    const mMat = new BABYLON.StandardMaterial("m", scene);
+    mMat.emissiveColor = new BABYLON.Color3(0.35,0.02,0.02);
+    monster.material = mMat; monster.position.set(0,1,-40);
+
+    let stamina = 1.0, sanity = 1.0, flashlightOn = true;
+    const stFill = document.querySelector("#stamina .fill");
+    const saFill = document.querySelector("#sanity .fill");
+
+    // Movement loop
+    const keys = {};
+    scene.onKeyboardObservable.add(k=>{
+      const e=k.event;
+      if(k.type===BABYLON.KeyboardEventTypes.KEYDOWN){ keys[e.code]=true; if(e.code==="KeyF"){ flashlightOn=!flashlightOn; } }
+      if(k.type===BABYLON.KeyboardEventTypes.KEYUP){ keys[e.code]=false; }
+    });
+
+    scene.onBeforeRenderObservable.add(()=>{
+      const dt = scene.getEngine().getDeltaTime()/1000;
+      flashlight.position.copyFrom(camera.position);
+      flashlight.direction = camera.getTarget().subtract(camera.position).normalize();
+      flashlight.intensity = flashlightOn ? (6 + (1-sanity)*6) : 0.0;
+
+      // WASD
+      const dir = new BABYLON.Vector3(
+        (keys["KeyD"]?1:0) - (keys["KeyA"]?1:0),
+        0,
+        (keys["KeyS"]?1:0) - (keys["KeyW"]?1:0)
+      );
+      if (dir.lengthSquared()>0){
+        dir.normalize();
+        const forward = camera.getDirection(BABYLON.Axis.Z);
+        const right = camera.getDirection(BABYLON.Axis.X);
+        const move = forward.scale(dir.z).add(right.scale(dir.x));
+
+        // Sprint drains stamina
+        const sprinting = keys["ShiftLeft"] || keys["ShiftRight"];
+        const speed = (sprinting && stamina>0.05)? 6.0 : 3.0;
+        camera.position.addInPlace(move.scale(speed*dt));
+        stamina += (sprinting?-0.45:0.25)*dt;
+        stamina = Math.min(1, Math.max(0, stamina));
+        stFill.style.width = (stamina*100).toFixed(1)+"%";
+      } else {
+        stamina = Math.min(1, stamina + 0.35*dt);
+        stFill.style.width = (stamina*100).toFixed(1)+"%";
+      }
+
+      // Monster logic: quietly stalks behind player until close, then charges
+      const toPlayer = camera.position.subtract(monster.position);
+      const dist = toPlayer.length();
+      const wantDist = 12 + Math.sin(scene.getEngine().getFps()*0.1)*2;
+      if (dist > wantDist) {
+        // teleport occasionally to keep tension
+        if (Math.random()<0.002) {
+          const angle = Math.random()*Math.PI*2;
+          const radius = 25 + Math.random()*10;
+          monster.position = camera.position.add(new BABYLON.Vector3(Math.cos(angle)*radius, 1, Math.sin(angle)*radius));
+        } else {
+          const step = toPlayer.normalize().scale( (dist>40? 0.6 : 1.6) * dt );
+          monster.position.addInPlace(step);
+        }
+      } else {
+        // close = sanity drain
+        sanity -= 0.2*dt;
+        sanity = Math.max(0, sanity);
+        saFill.style.width = (sanity*100).toFixed(1)+"%";
+      }
+
+      // Lose condition
+      if (sanity <= 0) {
+        scene.onBeforeRenderObservable.clear();
+        const died = document.createElement('div');
+        died.style.cssText = "position:fixed;inset:0;display:grid;place-items:center;background:#000a;color:#fff;font-size:28px";
+        died.textContent = "You lost yourself to the forest.";
+        document.body.appendChild(died);
+      }
+    });
+
+<audio src="scary-ambience-59002.ogg" autoplay loop></audio>
+
+
+
+    return scene;
+  };
+
+  const scene = createScene();
+  engine.runRenderLoop(() => scene.render());
+  window.addEventListener("resize", () => engine.resize());
+})();
+</script>
+</body>
+</html>
